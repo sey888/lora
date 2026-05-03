@@ -5,6 +5,7 @@ import torch.nn.functional as F
 from torchvision.transforms import Compose
 
 from .dinov2 import DINOv2
+from networks.polar_attention import PolarAttention # 导入 PolarAttention 模块
 from .util.blocks import FeatureFusionBlock, _make_scratch
 from .util.transform import Resize, NormalizeImage, PrepareForNet
 
@@ -102,6 +103,9 @@ class DPTHead(nn.Module):
         self.scratch.refinenet3 = _make_fusion_block(features, use_bn)
         self.scratch.refinenet4 = _make_fusion_block(features, use_bn)
         
+        # 新增 PolarAttention 模块
+        self.polar_attention = PolarAttention(channels=features)
+
         head_features_1 = features
         head_features_2 = 32
         
@@ -142,7 +146,10 @@ class DPTHead(nn.Module):
         path_2 = self.scratch.refinenet2(path_3, layer_2_rn, size=layer_1_rn.shape[2:])
         path_1 = self.scratch.refinenet1(path_2, layer_1_rn)
         
-        out = self.scratch.output_conv1(path_1)
+        # 应用 PolarAttention
+        out = self.polar_attention(path_1)
+
+        out = self.scratch.output_conv1(out)
         out = F.interpolate(out, (int(patch_h * 14), int(patch_w * 14)), mode="bilinear", align_corners=True)
         out = self.scratch.output_conv2(out)
         
