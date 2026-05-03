@@ -19,8 +19,7 @@ class PanDA(nn.Module):
         """
         PanDA model for depth estimation.
         Optimized for Joint Training (10 Epochs total).
-        Combines Hierarchical LoRA and Latitude-guided Attention 
-        in an end-to-end manner.
+        Uses Dynamic Gradient Control to prevent optimization interference.
         """
         super().__init__()
         
@@ -59,16 +58,41 @@ class PanDA(nn.Module):
         if lora:
             self.core = depth_anything
             LoRA_Depth_Anything_v2(depth_anything, lora_ranks=lora_ranks)
-            
-            # PURE JOINT TRAINING: No parameters are frozen. 
-            # Both LoRA and Attention will learn together for 10 epochs.
-            if not train_decoder:
-                for param in self.core.depth_head.parameters():
-                    # Ensure PolarAttention is still trainable even if other decoder parts are not
-                    if "polar_attention" not in name:
-                        param.requires_grad = False
         else:
             self.core = depth_anything
+
+        # Current epoch for dynamic control
+        self.current_epoch = 0
+
+    def set_epoch(self, epoch):
+        """
+        Dynamically control the training behavior based on epoch.
+        Ensures LoRA stabilizes before Attention takes over.
+        """
+        self.current_epoch = epoch
+        
+        # --- DYNAMIC GRADIENT CONTROL ---
+        # First 50% of epochs (e.g., 0-4): Focus on LoRA
+        if epoch < 5:
+            # Enable LoRA and Backbone
+            for name, param in self.named_parameters():
+                if "polar_attention" in name:
+                    param.requires_grad = False
+                else:
+                    param.requires_grad = True
+            # Force gamma to 0 during initial phase
+            if hasattr(self.core.depth_head, 'polar_attention'):
+                self.core.depth_head.polar_attention.gamma.data.fill_(0.0)
+        
+        # Last 50% of epochs (e.g., 5-9): Enable Attention
+        else:
+            # Keep everything trainable, but now Attention starts from a stable LoRA baseline
+            for param in self.parameters():
+                param.requires_grad = True
+            # Alternatively, if you want maximum stability, freeze LoRA and only train Attention:
+            # for name, param in self.named_parameters():
+            #     if "polar_attention" in name: param.requires_grad = True
+            #     else: param.requires_grad = False
 
     def forward(self, image):
         if image.dim() == 3:
