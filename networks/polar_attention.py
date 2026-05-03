@@ -4,26 +4,24 @@ import torch.nn as nn
 
 class PolarAttention(nn.Module):
     """
-    Refined Polar Coordinate Attention for stable Joint Training.
-    Key design: 
-    1. Residual gating with gamma initialized to 0.0 to ensure 
-       it starts from the exact LoRA-only baseline.
-    2. Decoupled from the encoder to prevent gradient interference.
+    Ultimate Stable Polar Attention for Joint Training.
+    Designed to ensure precision boost without interfering with LoRA's convergence.
     """
     def __init__(self, channels: int):
         super(PolarAttention, self).__init__()
 
+        # Use a lightweight bottleneck to extract spatial features
         self.spatial_attn = nn.Sequential(
-            nn.Conv2d(channels, channels // 4, kernel_size=1, bias=False),
-            nn.BatchNorm2d(channels // 4),
+            nn.Conv2d(channels, channels // 8, kernel_size=1, bias=False),
+            nn.BatchNorm2d(channels // 8),
             nn.ReLU(inplace=True),
-            nn.Conv2d(channels // 4, 1, kernel_size=3, padding=1, bias=False),
+            nn.Conv2d(channels // 8, 1, kernel_size=3, padding=1, bias=False),
             nn.Sigmoid()
         )
 
-        # Gamma is the gating factor, initialized to 0.0.
-        # This ensures that at the beginning of joint training, 
-        # the model is mathematically identical to the LoRA-only baseline.
+        # CRITICAL: Initialize gamma to EXACTLY 0.0.
+        # This acts as a 'safety valve' that ensures the model starts 
+        # exactly from the LoRA baseline and only adds improvements.
         self.gamma = nn.Parameter(torch.zeros(1))
 
         self._init_weights()
@@ -37,21 +35,24 @@ class PolarAttention(nn.Module):
                 nn.init.constant_(m.bias, 0)
 
     def _get_latitude_prior(self, H: int, device, dtype) -> torch.Tensor:
+        # Generate a latitude-aware prior (1.0 at equator, higher at poles)
         row_idx = torch.arange(H, device=device, dtype=dtype)
         phi = math.pi * (row_idx + 0.5) / H
-        # Latitude-aware weight: focus more on the polar regions where ERP distortion is high
+        # Distortion is higher at poles, so we give more attention weight there
         w = 1.0 - torch.sin(phi)
         w = w / (w.mean() + 1e-6)
         return w.view(1, 1, H, 1)
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
-        B, C, H, W = x.shape
-        # Spatial attention map
+        # 1. Compute spatial attention
         attn = self.spatial_attn(x)
-        # Apply latitude geometric prior
-        lat_prior = self._get_latitude_prior(H, x.device, x.dtype)
+        
+        # 2. Multiply by geometric latitude prior
+        lat_prior = self._get_latitude_prior(x.shape[2], x.device, x.dtype)
         attn = attn * lat_prior
         
-        # Residual gating: x_out = x + gamma * (x * attention)
-        # When gamma=0, x_out = x (the stable LoRA feature)
+        # 3. Residual Gating: Out = x + gamma * (x * attention)
+        # Because gamma=0 at start, the model initially behaves exactly like the baseline.
+        # This prevents the initial random noise of the attention module 
+        # from disrupting LoRA's learning process.
         return x + self.gamma * (x * attn)

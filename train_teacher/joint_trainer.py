@@ -179,10 +179,6 @@ class Joint_Trainer:
         self.start_time = time.time()
         
         for self.epoch in range(self.config['epoch_max']):
-            # 动态调整模型梯度 (梯度热启动策略)
-            if hasattr(self.model, 'set_epoch'):
-                self.model.set_epoch(self.epoch)
-            
             self.train_one_epoch()
             if (self.epoch + 1) % self.config['epoch_save'] == 0:
                 self.save_model(if_best=False)

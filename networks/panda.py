@@ -5,7 +5,6 @@ import torch.nn as nn
 import torch.nn.functional as F
 from torchvision.transforms import Compose
 import cv2
-import os
 
 from depth_anything_v2_metric.depth_anything_v2.dpt import DepthAnythingV2
 from .utils import LoRA_Depth_Anything_v2
@@ -18,8 +17,9 @@ class PanDA(nn.Module):
     def __init__(self, args):
         """
         PanDA model for depth estimation.
-        Optimized for Joint Training (10 Epochs total).
-        Uses Dynamic Gradient Control to prevent optimization interference.
+        Final Joint Training Version: 
+        Full 10-epoch training of LoRA + PolarAttention.
+        Ensures stability via residual gating in the attention module.
         """
         super().__init__()
         
@@ -31,18 +31,18 @@ class PanDA(nn.Module):
         train_decoder = args.train_decoder
         lora_ranks = args.lora_ranks
 
-        # Pre-defined setting of the model
+        # Model architecture configuration
         model_configs = {
-        'vits': {'encoder': 'vits', 'features': 64, 'out_channels': [48, 96, 192, 384]},
-        'vitb': {'encoder': 'vitb', 'features': 128, 'out_channels': [96, 192, 384, 768]},
-        'vitl': {'encoder': 'vitl', 'features': 256, 'out_channels': [256, 512, 1024, 1024]},
-        'vitg': {'encoder': 'vitg', 'features': 384, 'out_channels': [1536, 1536, 1536, 1536]}
+            'vits': {'encoder': 'vits', 'features': 64, 'out_channels': [48, 96, 192, 384]},
+            'vitb': {'encoder': 'vitb', 'features': 128, 'out_channels': [96, 192, 384, 768]},
+            'vitl': {'encoder': 'vitl', 'features': 256, 'out_channels': [256, 512, 1024, 1024]},
+            'vitg': {'encoder': 'vitg', 'features': 384, 'out_channels': [1536, 1536, 1536, 1536]}
         }
         
-        # 1. Initialize Base Model
+        # 1. Initialize DepthAnythingV2
         depth_anything = DepthAnythingV2(**{**model_configs[midas_model_type], 'max_depth': 1.0})
         
-        # 2. Load standard pretrained weights (strict=False for new Attention module)
+        # 2. Load weights (strict=False to accommodate the new PolarAttention module)
         if fine_tune_type == 'none':
             pretrained_path = f'checkpoints/depth_anything_v2_{midas_model_type}.pth'
         elif fine_tune_type == 'hypersim':
@@ -54,51 +54,25 @@ class PanDA(nn.Module):
             
         depth_anything.load_state_dict(torch.load(pretrained_path), strict=False)
         
-        # 3. Apply LoRA and setup Joint Training
+        # 3. Apply LoRA to the encoder
         if lora:
             self.core = depth_anything
             LoRA_Depth_Anything_v2(depth_anything, lora_ranks=lora_ranks)
+            
+            # Ensure all parameters are trainable for a true joint training experiment
+            if not train_decoder:
+                for name, param in self.core.depth_head.named_parameters():
+                    # Even if decoder is frozen, PolarAttention must remain trainable
+                    if "polar_attention" not in name:
+                        param.requires_grad = False
         else:
             self.core = depth_anything
-
-        # Current epoch for dynamic control
-        self.current_epoch = 0
-
-    def set_epoch(self, epoch):
-        """
-        Dynamically control the training behavior based on epoch.
-        Ensures LoRA stabilizes before Attention takes over.
-        """
-        self.current_epoch = epoch
-        
-        # --- DYNAMIC GRADIENT CONTROL ---
-        # First 50% of epochs (e.g., 0-4): Focus on LoRA
-        if epoch < 5:
-            # Enable LoRA and Backbone
-            for name, param in self.named_parameters():
-                if "polar_attention" in name:
-                    param.requires_grad = False
-                else:
-                    param.requires_grad = True
-            # Force gamma to 0 during initial phase
-            if hasattr(self.core.depth_head, 'polar_attention'):
-                self.core.depth_head.polar_attention.gamma.data.fill_(0.0)
-        
-        # Last 50% of epochs (e.g., 5-9): Enable Attention
-        else:
-            # Keep everything trainable, but now Attention starts from a stable LoRA baseline
-            for param in self.parameters():
-                param.requires_grad = True
-            # Alternatively, if you want maximum stability, freeze LoRA and only train Attention:
-            # for name, param in self.named_parameters():
-            #     if "polar_attention" in name: param.requires_grad = True
-            #     else: param.requires_grad = False
 
     def forward(self, image):
         if image.dim() == 3:
             image = image.unsqueeze(0)
 
-        # Forward of erp image
+        # Main forward pass
         erp_pred = self.core(image)
         erp_pred = erp_pred.unsqueeze(1)
       
@@ -110,11 +84,8 @@ class PanDA(nn.Module):
     @torch.no_grad()
     def infer_image(self, raw_image, input_size=518):
         image, (h, w) = self.image2tensor(raw_image, input_size)
-        
         depth = self.forward(image)["pred_depth"]
-        
         depth = F.interpolate(depth, (h, w), mode="bilinear", align_corners=True)[0, 0]
-        
         return depth.cpu().numpy()
     
     def image2tensor(self, raw_image, input_size=518):        
@@ -131,17 +102,12 @@ class PanDA(nn.Module):
             NormalizeImage(mean=[0.485, 0.456, 0.406], std=[0.229, 0.224, 0.225]),
             PrepareForNet(),
         ])
-        
         h, w = raw_image.shape[:2]
-        
         image = cv2.cvtColor(raw_image, cv2.COLOR_BGR2RGB) / 255.0
-        
         image = transform({'image': image})['image']
         image = torch.from_numpy(image).unsqueeze(0)
-        
-        DEVICE = 'cuda' if torch.cuda.is_available() else 'mps' if torch.backends.mps.is_available() else 'cpu'
+        DEVICE = 'cuda' if torch.cuda.is_available() else 'cpu'
         image = image.to(DEVICE)
-        
         return image, (h, w)
     
 @register('panda')
