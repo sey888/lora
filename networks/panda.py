@@ -18,9 +18,9 @@ class PanDA(nn.Module):
     def __init__(self, args):
         """
         PanDA model for depth estimation.
-        Updated for final thesis defense: 
-        Ensures precision improvement by freezing Stage 1 (LoRA) 
-        and only training PolarAttention.
+        Optimized for Joint Training (10 Epochs total).
+        Combines Hierarchical LoRA and Latitude-guided Attention 
+        in an end-to-end manner.
         """
         super().__init__()
         
@@ -43,18 +43,7 @@ class PanDA(nn.Module):
         # 1. Initialize Base Model
         depth_anything = DepthAnythingV2(**{**model_configs[midas_model_type], 'max_depth': 1.0})
         
-        # 2. Apply LoRA structure first
-        if lora:
-            self.core = depth_anything
-            LoRA_Depth_Anything_v2(depth_anything, lora_ranks=lora_ranks)
-        else:
-            self.core = depth_anything
-
-        # 3. Load Stage 1 (LoRA) Weights - The 0.0609 baseline
-        # Priority: tmp/_train/best/model.pth (Your most successful checkpoint)
-        stage1_path = 'tmp/_train/best/model.pth'
-        
-        # Standard pretrained weights for fallback
+        # 2. Load standard pretrained weights (strict=False for new Attention module)
         if fine_tune_type == 'none':
             pretrained_path = f'checkpoints/depth_anything_v2_{midas_model_type}.pth'
         elif fine_tune_type == 'hypersim':
@@ -63,26 +52,23 @@ class PanDA(nn.Module):
             pretrained_path = f'checkpoints/depth_anything_v2_metric_vkitti_{midas_model_type}.pth'
         else:
             pretrained_path = f'checkpoints/depth_anything_v2_{midas_model_type}.pth'
-
-        # Loading logic
-        if os.path.exists(stage1_path):
-            print(f">>> [Thesis Defense Mode] Loading Stage 1 Best Weights: {stage1_path}")
-            # strict=False is necessary because of the new PolarAttention module
-            self.load_state_dict(torch.load(stage1_path), strict=False)
             
-            # PHYSICAL FREEZE: Lock the 0.0609 baseline
-            print(">>> Freezing LoRA and Backbone. Only PolarAttention is trainable.")
-            for name, param in self.named_parameters():
-                if "polar_attention" in name:
-                    param.requires_grad = True
-                else:
-                    param.requires_grad = False
-        else:
-            print(f">>> [Warning] Stage 1 weights not found at {stage1_path}. Falling back to pretrained.")
-            depth_anything.load_state_dict(torch.load(pretrained_path), strict=False)
+        depth_anything.load_state_dict(torch.load(pretrained_path), strict=False)
+        
+        # 3. Apply LoRA and setup Joint Training
+        if lora:
+            self.core = depth_anything
+            LoRA_Depth_Anything_v2(depth_anything, lora_ranks=lora_ranks)
+            
+            # PURE JOINT TRAINING: No parameters are frozen. 
+            # Both LoRA and Attention will learn together for 10 epochs.
             if not train_decoder:
                 for param in self.core.depth_head.parameters():
-                    param.requires_grad = False
+                    # Ensure PolarAttention is still trainable even if other decoder parts are not
+                    if "polar_attention" not in name:
+                        param.requires_grad = False
+        else:
+            self.core = depth_anything
 
     def forward(self, image):
         if image.dim() == 3:
