@@ -4,15 +4,15 @@ import torch.nn as nn
 
 class PolarAttention(nn.Module):
     """
-    Simplified Polar Coordinate Attention module for ERP feature maps.
-    Designed for Stage 2 training:
-    1. Initialized with gamma=0 to ensure we start from the exact Stage 1 performance.
-    2. Placed at decoder side to decouple from frozen encoder LoRA.
+    Refined Polar Coordinate Attention for stable Joint Training.
+    Key design: 
+    1. Residual gating with gamma initialized to 0.0 to ensure 
+       it starts from the exact LoRA-only baseline.
+    2. Decoupled from the encoder to prevent gradient interference.
     """
     def __init__(self, channels: int):
         super(PolarAttention, self).__init__()
 
-        # A simple spatial attention branch
         self.spatial_attn = nn.Sequential(
             nn.Conv2d(channels, channels // 4, kernel_size=1, bias=False),
             nn.BatchNorm2d(channels // 4),
@@ -21,7 +21,9 @@ class PolarAttention(nn.Module):
             nn.Sigmoid()
         )
 
-        # Learnable scale for the residual (initialized to 0 for safe Stage 2 start)
+        # Gamma is the gating factor, initialized to 0.0.
+        # This ensures that at the beginning of joint training, 
+        # the model is mathematically identical to the LoRA-only baseline.
         self.gamma = nn.Parameter(torch.zeros(1))
 
         self._init_weights()
@@ -37,16 +39,19 @@ class PolarAttention(nn.Module):
     def _get_latitude_prior(self, H: int, device, dtype) -> torch.Tensor:
         row_idx = torch.arange(H, device=device, dtype=dtype)
         phi = math.pi * (row_idx + 0.5) / H
-        # Inverse sine prior: focus on poles
+        # Latitude-aware weight: focus more on the polar regions where ERP distortion is high
         w = 1.0 - torch.sin(phi)
-        # Normalize to mean 1
         w = w / (w.mean() + 1e-6)
         return w.view(1, 1, H, 1)
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
         B, C, H, W = x.shape
+        # Spatial attention map
         attn = self.spatial_attn(x)
+        # Apply latitude geometric prior
         lat_prior = self._get_latitude_prior(H, x.device, x.dtype)
         attn = attn * lat_prior
-        out = x * attn
-        return x + self.gamma * out
+        
+        # Residual gating: x_out = x + gamma * (x * attention)
+        # When gamma=0, x_out = x (the stable LoRA feature)
+        return x + self.gamma * (x * attn)

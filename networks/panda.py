@@ -5,7 +5,6 @@ import torch.nn as nn
 import torch.nn.functional as F
 from torchvision.transforms import Compose
 import cv2
-import os
 
 from depth_anything_v2_metric.depth_anything_v2.dpt import DepthAnythingV2
 from .utils import LoRA_Depth_Anything_v2
@@ -40,7 +39,7 @@ class PanDA(nn.Module):
         # Load the pretrained model of depth anything
         depth_anything = DepthAnythingV2(**{**model_configs[midas_model_type], 'max_depth': 1.0})
         
-        # 1. 基础权重加载
+        # Load weights with strict=False to allow for the new PolarAttention module
         if fine_tune_type == 'none':
             depth_anything.load_state_dict(torch.load(f'checkpoints/depth_anything_v2_{midas_model_type}.pth'), strict=False)
         elif fine_tune_type == 'hypersim':
@@ -49,30 +48,14 @@ class PanDA(nn.Module):
             depth_anything.load_state_dict(torch.load(f'checkpoints/depth_anything_v2_metric_vkitti_{midas_model_type}.pth'), strict=False)
         elif fine_tune_type == "backbone":
             depth_anything.load_state_dict(torch.load(f'checkpoints/depth_anything_v2_{midas_model_type}.pth'), strict=False)
+        elif fine_tune_type == "inference":
+            pass
         
-        # 2. 自动检测并加载阶段一收敛权重 (Best Model)
-        stage1_path = 'tmp/_train/best/model.pth'
-        is_stage2 = False
-        
+        # Apply LoRA to the model for erp branch
         if lora:
             self.core = depth_anything
             LoRA_Depth_Anything_v2(depth_anything, lora_ranks=lora_ranks)
-            
-            if os.path.exists(stage1_path):
-                print(f">>> [Stage 2] 检测到阶段一权重: {stage1_path}")
-                print(">>> 正在加载阶段一权重并冻结 LoRA 参数...")
-                self.load_state_dict(torch.load(stage1_path), strict=False)
-                is_stage2 = True
-                
-                # 冻结所有参数，只开放 PolarAttention 的梯度
-                for name, param in self.named_parameters():
-                    if "polar_attention" in name:
-                        param.requires_grad = True
-                    else:
-                        param.requires_grad = False
-                print(">>> [Stage 2] 冻结完成，仅 PolarAttention 模块可训练。")
-            
-            if not train_decoder and not is_stage2:
+            if not train_decoder:
                 for param in self.core.depth_head.parameters():
                     param.requires_grad = False
         else:
