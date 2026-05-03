@@ -1,0 +1,84 @@
+label_dataset_1:
+  name: threeD60
+  root_path: /root/autodl-tmp/
+  list_path: datasets/3d60_train.txt
+  args:
+    height: 504
+    width: 1008
+    repeat: 1
+    augment_color: False
+    augment_flip: True
+    augment_rotation: True
+  batch_size: 1
+  num_workers: 4
+
+label_dataset_2:
+  name: threeD60
+  root_path: /root/autodl-tmp/
+  list_path: datasets/3d60_train1.txt
+  args:
+    height: 504
+    width: 1008
+    repeat: 1
+    augment_color: False
+    augment_flip: True
+    augment_rotation: True
+  batch_size: 1
+  num_workers: 4
+
+unlabel_dataset:
+  name: threeD60
+  root_path: /root/autodl-tmp/
+  list_path: datasets/3d60_train.txt
+  args:
+    height: 504
+    width: 1008
+    repeat: 1
+    augment_color: True
+    augment_flip: True
+    augment_rotation: True
+  batch_size: 1
+  num_workers: 4
+
+val_dataset:
+  name: threeD60
+  root_path: /root/autodl-tmp/
+  list_path: datasets/3d60_val.txt
+  args:
+    height: 504
+    width: 1008
+    repeat: 1
+    augment_color: False
+    augment_flip: False
+    augment_rotation: False
+  batch_size: 1
+  num_workers: 4
+
+model:
+  name: panda
+  args:
+    midas_model_type: vitb
+    fine_tune_type: hypersim
+    min_depth: 0.01
+    max_depth: 10.0
+    lora: True
+    train_decoder: True
+    lora_rank: 4
+
+loss: [ {'type': 'silog', 'params': {'loss_weight': 1.0}}, 
+        {'type': 'gradient', 'params': {'loss_weight': 1.0}},
+        {'type': 'epnl', 'params': {'loss_weight':5.0, 'random_num':32, 'batch_limit':8, 'lower_bound':0.125, 'upper_bound':0.5}}]
+loss_weights: [1.0, 1.0, 1.0, 1.0]
+
+mobius:
+  conduct: True
+  vertical_res: 18
+  zoom_res: 0.5
+
+optimizer:
+  lr: 1.e-4
+epoch_max: 4
+log_frequency: 40
+
+epoch_val: 1
+epoch_save: 1
